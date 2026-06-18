@@ -1,0 +1,36 @@
+
+# Point SONAR_HOST_URL / SONAR_TOKEN at your own SonarQube server. This stage is
+# allow_failure, so the pipeline still passes if no Sonar instance is configured.
+sonarqube:scan:
+  stage: analyze
+  image:
+    name: sonarsource/sonar-scanner-cli:12.1
+    entrypoint: [""]
+  allow_failure: true
+  script:
+    - sonar-scanner
+        -Dsonar.projectKey="${SONAR_PROJECT_KEY}"
+        -Dsonar.host.url="${SONAR_HOST_URL}"
+        -Dsonar.token="${SONAR_TOKEN}"
+        -Dsonar.scm.revision="${CI_COMMIT_SHA}"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ── Quality Gate check ───────────────────────────────────────────
+sonarqube:gate:
+  stage: analyze
+  image: curlimages/curl:latest
+  allow_failure: true
+  needs:
+    - sonarqube:scan
+  script:
+    - |
+      STATUS=$(curl -s -u "${SONAR_TOKEN}:" \
+        "${SONAR_HOST_URL}/api/qualitygates/project_status?projectKey=${SONAR_PROJECT_KEY}" \
+        | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+      echo "Quality Gate: $STATUS"
+      [ "$STATUS" = "OK" ] || exit 1
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

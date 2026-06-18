@@ -1,0 +1,13 @@
+{{- if not .Values.certificate.id }}
+{{- fail "certificate.id is required (the YC Certificate Manager managed certificate ID). Set it via --set certificate.id=..." }}
+{{- end }}
+apiVersion: gwin.yandex.cloud/v1
+kind: YCCertificate
+metadata:
+  name: {{ .Values.certificate.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gwin.labels" . | nindent 4 }}
+spec:
+  certificateRef:
+    certificateID: {{ .Values.certificate.id | quote }}

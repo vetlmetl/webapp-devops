@@ -1,0 +1,58 @@
+variables:
+  ARTIFACT_BACK: momo-api-1.0.${CI_PIPELINE_ID}.tar.gz
+  ARTIFACT_FRONT: momo-front-1.0.${CI_PIPELINE_ID}.tar.gz
+#  DOCKER_TLS_CERTDIR: "/certs"
+#  IMAGE_TAG: $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG
+  TF_CLI_CONFIG_FILE: "$CI_PROJECT_DIR/infra/terraform/.terraformrc"
+  SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"  # Defines the location of the analysis task cache
+  SONAR_PROJECT_KEY: "devops-final-project"
+  GIT_DEPTH: "0"  # Tells git to fetch all the branches of the project, required by the analysis task
+
+stages:
+  - extract
+  - provision
+  - test
+  - analyze
+  - monitoring
+  - build
+  - deploy
+  - destroy
+
+.go-cache:
+  variables:
+    GOPATH: $CI_PROJECT_DIR/backend/.go
+  before_script:
+    - mkdir -p backend/.go
+  cache:
+    key: backend-${CI_COMMIT_REF_SLUG}
+    paths:
+      - backend/.go/pkg/mod/
+    policy: pull-push
+
+.yc_install:
+  before_script:
+    - apk add --no-cache curl bash
+    - curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash -s -- -i /usr/local -n
+    - echo "${YC_KEY}" | base64 -d > infra/terraform/sa-key.json
+    - yc config set service-account-key infra/terraform/sa-key.json
+    - yc config set cloud-id $YC_CLOUD_ID
+    - yc config set folder-id $YC_FOLDER_ID
+
+.ssh_vm_docker:
+  before_script:
+    - 'command -v ssh-agent >/dev/null || ( apk add --update openssh)'
+    - eval $(ssh-agent -s)
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - echo "$SSH_PRIVATE_KEY" | base64 -d > ~/.ssh/id_key
+    - chmod 600 ~/.ssh/id_key
+    - export VM_IP=$(cat vm_ip.txt)
+    - echo ${VM_IP}
+    - |
+      echo "Waiting for SSH on ${VM_IP}..."
+      for i in $(seq 1 60); do
+        ssh -i ~/.ssh/id_key -o ConnectTimeout=5 -o StrictHostKeyChecking=no ubuntu@${VM_IP} "echo SSH ready" && break
+        sleep 10
+      done
+    - ssh-keyscan -H $VM_IP >> ~/.ssh/known_hosts
+    - ssh -i ~/.ssh/id_key ubuntu@${VM_IP} 'until [ -f /opt/done_provisioning.txt ]; do sleep 1; done'

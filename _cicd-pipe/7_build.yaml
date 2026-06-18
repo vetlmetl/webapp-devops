@@ -1,0 +1,225 @@
+build-release:backend:
+  stage: build
+  image: golang:1.25
+  needs:
+    - job: extract_tag
+      artifacts: true
+  extends: .go-cache
+  before_script:
+    - tar --exclude='backend/.go' -czvf src-${ARTIFACT_BACK} backend/
+  script:
+    - set -euo pipefail
+    - cd backend
+    - go build -o momo-api ./cmd/api
+    - tar -czvf ${ARTIFACT_BACK} momo-api
+    - cd ..
+    - curl --retry 12 --retry-all-errors --fail -u "${NEXUS_USER}:${NEXUS_PASSWORD}" --upload-file backend/${ARTIFACT_BACK} "${NEXUS_URL}${NEXUS_REPO}/${ARTIFACT_BACK}"
+    - curl --retry 12 --retry-all-errors --fail -u "${NEXUS_USER}:${NEXUS_PASSWORD}" --upload-file src-${ARTIFACT_BACK} "${NEXUS_URL}${NEXUS_REPO}/src-${ARTIFACT_BACK}"
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_TITLE =~ /release:v[0-9]+\.[0-9]+\.[0-9]+/
+      when: on_success
+
+build-release:frontend:
+  stage: build
+  image: node:20-alpine
+  needs:
+    - job: extract_tag
+      artifacts: true
+##    - job: test:frontend
+  before_script:
+    - tar -czvf src-${ARTIFACT_FRONT} frontend/
+    - apk add --no-cache curl bash
+  script:
+    - set -euo pipefail
+    - cd frontend
+    - npm ci
+    - NODE_ENV=production VUE_APP_API_URL=http://api npm run build
+    - tar -czvf ${ARTIFACT_FRONT} dist/ 
+    - cd ..
+    - curl --retry 12 --retry-all-errors --fail -u "${NEXUS_USER}:${NEXUS_PASSWORD}" --upload-file frontend/${ARTIFACT_FRONT} "${NEXUS_URL}${NEXUS_REPO}/${ARTIFACT_FRONT}"
+    - curl --retry 12 --retry-all-errors --fail -u "${NEXUS_USER}:${NEXUS_PASSWORD}" --upload-file src-${ARTIFACT_FRONT} "${NEXUS_URL}${NEXUS_REPO}/src-${ARTIFACT_FRONT}"
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_TITLE =~ /release:v[0-9]+\.[0-9]+\.[0-9]+/
+      when: on_success
+
+build:backend_kaniko:
+  stage: build
+#  when: manual
+  image:
+#     name: ghcr.io/kaniko-build/dist/chainguard-forks-kaniko/executor:v1.25.13
+     name: gcr.io/kaniko-project/executor:v1.24.0-debug
+     entrypoint: [""]
+  needs:
+    - job: extract_tag
+      artifacts: true
+    - job: build-release:backend
+    - job: monitoring:prometheus
+      artifacts: true
+  before_script:
+    - mkdir -p /kaniko/.docker
+    # Force kaniko's Google keychain to fall back to anonymous pulls for the
+    # public gcr.io/distroless base image. Without this it sends invalid ADC
+    # credentials to gcr.io and the token request fails with UNAUTHORIZED.
+    - export GOOGLE_APPLICATION_CREDENTIALS=/nonexistent-disable-google-keychain.json
+    - export REGISTRY_ID=$(cat registry.txt)
+    - |
+      YC_JSON_KEY=$(echo "${YC_KEY}" | base64 -d)
+      AUTH=$(echo -n "json_key:${YC_JSON_KEY}" | base64 | tr -d '\n')
+      echo "{\"auths\":{\"cr.yandex\":{\"auth\":\"${AUTH}\"}}}" > /kaniko/.docker/config.json
+  script:
+    - cd backend
+    - |
+      /kaniko/executor \
+        --context "${CI_PROJECT_DIR}/backend" \
+        --dockerfile "${CI_PROJECT_DIR}/backend/Dockerfile" \
+        --destination "cr.yandex/${REGISTRY_ID}/backend:${RELEASE_TAG}" \
+        --destination "cr.yandex/${REGISTRY_ID}/backend:latest" \
+        --image-download-retry=5 \
+        --push-retry=3 \
+        --cache=true
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_TITLE =~ /release:v[0-9]+\.[0-9]+\.[0-9]+/
+      when: on_success
+
+build:frontend_kaniko:
+  stage: build
+#  when: manual
+  image:
+#     name: ghcr.io/kaniko-build/dist/chainguard-forks-kaniko/executor:v1.25.13
+     name: gcr.io/kaniko-project/executor:v1.24.0-debug
+     entrypoint: [""]
+  needs:
+    - job: extract_tag
+      artifacts: true
+    - job: build-release:frontend
+    - job: build:backend_kaniko
+    - job: monitoring:prometheus
+      artifacts: true
+  before_script:
+    - mkdir -p /kaniko/.docker
+    # Force kaniko's Google keychain to fall back to anonymous pulls for the
+    # public gcr.io/distroless base image. Without this it sends invalid ADC
+    # credentials to gcr.io and the token request fails with UNAUTHORIZED.
+    - export GOOGLE_APPLICATION_CREDENTIALS=/nonexistent-disable-google-keychain.json
+    - export REGISTRY_ID=$(cat registry.txt)
+    - |
+      YC_JSON_KEY=$(echo "${YC_KEY}" | base64 -d)
+      AUTH=$(echo -n "json_key:${YC_JSON_KEY}" | base64 | tr -d '\n')
+      echo "{\"auths\":{\"cr.yandex\":{\"auth\":\"${AUTH}\"}}}" > /kaniko/.docker/config.json
+  script:
+    - cd frontend
+    - |
+      /kaniko/executor \
+        --context "${CI_PROJECT_DIR}/frontend" \
+        --dockerfile "${CI_PROJECT_DIR}/frontend/Dockerfile" \
+        --destination "cr.yandex/${REGISTRY_ID}/frontend:${RELEASE_TAG}" \
+        --destination "cr.yandex/${REGISTRY_ID}/frontend:latest" \
+        --image-download-retry=5 \
+        --push-retry=3 \
+        --cache=true
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_TITLE =~ /release:v[0-9]+\.[0-9]+\.[0-9]+/
+      when: on_success
+
+.trivy:scan:
+  stage: build
+  image:
+    name: aquasec/trivy:0.58.1
+    entrypoint: [""]
+  allow_failure: true
+  needs:
+    - job: extract_tag
+      artifacts: true
+    - job: monitoring:prometheus
+      artifacts: true
+  variables:
+    TRIVY_NO_PROGRESS: "true"
+    TRIVY_IGNORE_UNFIXED: "true"
+    TRIVY_CACHE_DIR: "${CI_PROJECT_DIR}/.trivycache"
+    DOCKER_CONFIG: "${CI_PROJECT_DIR}/.docker"
+  cache:
+    key: trivy-db
+    paths:
+      - .trivycache/
+  before_script:
+    - export REGISTRY_ID=$(cat registry.txt)
+    - export IMAGE="cr.yandex/${REGISTRY_ID}/${COMPONENT}:${RELEASE_TAG}"
+    - mkdir -p "${DOCKER_CONFIG}"
+    - |
+      YC_JSON_KEY=$(echo "${YC_KEY}" | base64 -d)
+      AUTH=$(echo -n "json_key:${YC_JSON_KEY}" | base64 | tr -d '\n')
+      echo "{\"auths\":{\"cr.yandex\":{\"auth\":\"${AUTH}\"}}}" > "${DOCKER_CONFIG}/config.json"
+  script:
+    - trivy image --scanners vuln --severity LOW,MEDIUM,HIGH,CRITICAL --exit-code 0 "${IMAGE}"
+    - trivy image --scanners vuln --format template --template "@/contrib/gitlab.tpl" 
+        -o "gl-container-scanning-report-${COMPONENT}.json" "${IMAGE}"
+    - trivy image --scanners vuln --severity HIGH,CRITICAL --exit-code 1 "${IMAGE}"
+  artifacts:
+    when: always
+    reports:
+      container_scanning: gl-container-scanning-report-${COMPONENT}.json
+    paths:
+      - gl-container-scanning-report-${COMPONENT}.json
+    expire_in: 1 week
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_TITLE =~ /release:v[0-9]+\.[0-9]+\.[0-9]+/
+      when: on_success
+
+trivy:backend:
+  extends: .trivy:scan
+  variables:
+    COMPONENT: backend
+  needs:
+    - job: extract_tag
+      artifacts: true
+    - job: monitoring:prometheus
+      artifacts: true
+    - job: build:backend_kaniko
+
+trivy:frontend:
+  extends: .trivy:scan
+  variables:
+    COMPONENT: frontend
+  needs:
+    - job: extract_tag
+      artifacts: true
+    - job: monitoring:prometheus
+      artifacts: true
+    - job: build:frontend_kaniko
+
+create_release:
+  stage: build
+  needs:
+    - job: extract_tag
+      artifacts: true
+    - job: build:frontend_kaniko
+    - job: trivy:backend
+    - job: trivy:frontend
+    - job: monitoring:prometheus
+      artifacts: true
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  script:
+#    - export RELEASE_TAG=$(cat release.txt)
+    - echo ${RELEASE_TAG}
+    - echo "${NEXUS_URL}${NEXUS_REPO}/src-${ARTIFACT_BACK}"
+    - export REGISTRY_ID=$(cat registry.txt)
+    - echo ${REGISTRY_ID}
+    - echo "https://cr.yandex/${REGISTRY_ID}/backend:${RELEASE_TAG}"
+    - |
+      DESC="Source code and artifacts were built and pushed to Nexus Repository Manager, Docker images were built and pushed to Yandex Container Registry."
+      RELEASE_DESC=$(printf '%s\n\n%s\n\n%s' "Commit message: ${COMMIT_MSG}" "${DESC}" "Author: ${GITLAB_USER_LOGIN}")
+      echo "Creating GitLab release for tag ${RELEASE_TAG}"
+      release-cli create \
+        --name "Release ${RELEASE_TAG}" \
+        --tag-name "${RELEASE_TAG}" \
+        --description "${RELEASE_DESC}" \
+        --assets-link "{\"name\":\"Backend Source Code\",\"url\":\"${NEXUS_URL}${NEXUS_REPO}/src-${ARTIFACT_BACK}\"}" \
+        --assets-link "{\"name\":\"Backend Artifact\",\"url\":\"${NEXUS_URL}${NEXUS_REPO}/${ARTIFACT_BACK}\"}" \
+        --assets-link "{\"name\":\"Backend Docker Image\",\"url\":\"https://cr.yandex/${REGISTRY_ID}/backend:${RELEASE_TAG}\"}" \
+        --assets-link "{\"name\":\"Frontend Source Code\",\"url\":\"${NEXUS_URL}${NEXUS_REPO}/src-${ARTIFACT_FRONT}\"}" \
+        --assets-link "{\"name\":\"Frontend Artifact\",\"url\":\"${NEXUS_URL}${NEXUS_REPO}/${ARTIFACT_FRONT}\"}" \
+        --assets-link "{\"name\":\"Frontend Docker Image\",\"url\":\"https://cr.yandex/${REGISTRY_ID}/frontend:${RELEASE_TAG}\"}"
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_TITLE =~ /release:v[0-9]+\.[0-9]+\.[0-9]+/
+      when: on_success
+

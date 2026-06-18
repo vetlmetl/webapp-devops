@@ -1,0 +1,13 @@
+# Copy this file to terraform.tfvars and fill in your own Yandex Cloud values.
+# terraform.tfvars is gitignored because it holds real cloud resource IDs.
+folder_id   = "<your-folder-id>"   # yc resource-manager folder list
+subnet_id   = "<your-subnet-id>"   # yc vpc subnet list
+image_id    = "<your-image-id>"    # yc compute image list (container-optimized image)
+disk_size   = 20
+node_cores  = 2
+node_memory = 4
+zone_id     = "ru-central1-b"
+vm_name     = "vm-for-docker"
+platform_id = "standard-v1"
+nat_enable  = true
+#nat_ip_address = "<your-static-nat-ip>"

@@ -1,0 +1,105 @@
+# Go binaries and compiled files
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.o
+*.a
+
+# Go test binaries
+*.test
+
+# Go coverage
+*.out
+*.cover
+*.coverprofile
+
+# Go vendor and modules
+vendor/
+go.sum.local
+
+# Node.js / Frontend dependencies
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/.env.local
+frontend/.env.*.local
+
+# Frontend package manager lock files (optional - usually tracked)
+# frontend/package-lock.json
+# frontend/yarn.lock
+# frontend/pnpm-lock.yaml
+
+# IDE and Editor files
+.vscode/
+AGENTS.md
+CLAUDE.md
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.code-workspace
+.editorconfig
+.env.example
+
+# Editor temporary files
+.*.un~
+*.tmp
+*.bak
+
+# OS specific
+Thumbs.db
+.DS_Store
+.AppleDouble
+.LSOverride
+*.sublime-workspace
+*.sublime-project
+
+# Environment files
+.env
+.env.local
+.env.production.local
+.env.development.local
+.env.test.local
+
+# Backend temporary files
+backend/tmp/
+backend/logs/
+
+# Frontend temporary files
+frontend/temp/
+
+# Project specific
+*.log
+*.pem
+*.key
+ToDo.md
+
+# Build and distribution directories
+dist/
+build/
+.next/
+.nuxt/
+
+# Terraform
+# Service account keys / secrets
+sa-key.json
+*-key.json
+# State (remote backend is used; never commit local state)
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+crash.log
+crash.*.log
+# Variable files that may contain secrets
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+# tfvars hold real cloud resource IDs — commit the .example template instead
+*.tfvars
+!*.tfvars.example
+

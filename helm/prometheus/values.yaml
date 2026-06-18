@@ -1,0 +1,29 @@
+prometheus:
+  prometheusSpec:
+    retention: 7d
+    retentionSize: 8GiB
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: yc-network-hdd
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 10Gi
+
+# Grafana is exposed through the shared ALB under a hard-to-guess path prefix
+# (the HTTPRoute lives in helm/gwin — gateway.name-grafana). Two things must
+# line up for that to work:
+#   * NodePort Service: GWIN's --nodecheck targets node IPs and forwards to a
+#     NodePort (ClusterIP has no node port -> ALB backend Port:0 -> 503).
+#   * serve_from_sub_path + root_url: Grafana must generate links/assets under
+#     the configured path prefix; the ALB passes the path through unchanged.
+#     Keep the domain + path below in sync with DOMAIN and helm/gwin pathPrefix.
+grafana:
+  service:
+    type: NodePort
+  grafana.ini:
+    server:
+      root_url: "https://example.dedyn.io/grafana"
+      serve_from_sub_path: true

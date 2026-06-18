@@ -1,0 +1,288 @@
+extract_new_tag:
+  stage: deploy
+  image: alpine/git:latest
+  before_script:
+    - apk add --no-cache curl jq
+  script:
+    - |
+      LATEST_TAG=$(curl -s --header "PRIVATE-TOKEN: $GITLAB_API_TOKEN" \
+        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/releases" \
+        | jq -r '.[0].tag_name')
+      echo "LATEST_TAG=${LATEST_TAG}" >> release.env
+      echo "Latest TAG: $LATEST_TAG"
+  artifacts:
+    reports:
+      dotenv: release.env
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+deploy:frontend:
+  stage: deploy
+#  when: manual
+  image:
+    name: alpine/k8s:1.34.1
+    entrypoint: [""]
+  extends: .yc_install
+  needs:
+    - job: extract_new_tag
+      artifacts: true
+    - job: deploy:backend
+  script:
+    - yc managed-kubernetes cluster get-credentials k8s-cluster --external --force
+    - export REGISTRY_ID=$(yc container registry get "${CONTAINER_REGISTRY}" | awk '/^id:/ {print $2}')
+    - |
+      sed -i.bak -E "s/^appVersion:.*/appVersion: \"${LATEST_TAG}\"/" helm/frontend/Chart.yaml
+      rm -f helm/frontend/Chart.yaml.bak
+      echo "Updated frontend Chart.yaml appVersion to ${LATEST_TAG}:"
+      grep ^appVersion helm/frontend/Chart.yaml
+    - |
+      helm upgrade --install frontend helm/frontend \
+        --namespace momo-store \
+        --create-namespace \
+        --set image.repository=cr.yandex/$REGISTRY_ID/frontend \
+        --set image.tag=${LATEST_TAG} \
+        --set image.pullPolicy=IfNotPresent \
+        --set metrics.enabled=true \
+        --set metrics.serviceMonitor.enabled=true \
+        --atomic \
+        --cleanup-on-fail \
+        --timeout 3m
+    - |
+      echo "Smoke testing frontend..."
+      kubectl -n momo-store rollout status deployment/frontend --timeout=120s
+      kubectl -n momo-store port-forward svc/frontend 18080:80 >/dev/null 2>&1 &
+      PF_PID=$!
+      trap 'kill $PF_PID 2>/dev/null || true' EXIT
+      sleep 3
+      OK=0
+      for i in $(seq 1 5); do
+        if curl -fsSL --max-time 10 http://127.0.0.1:18080/momo-store/ >/dev/null; then OK=1; break; fi
+        echo "attempt $i failed, retrying in 3s..."; sleep 3
+      done
+      if [ "$OK" -ne 1 ]; then
+        echo "Smoke test FAILED — rolling back frontend to previous revision"
+        helm rollback frontend 0 --namespace momo-store --wait --timeout 3m || echo "no previous revision to roll back to"
+        exit 1
+      fi
+      echo "Smoke test passed"
+
+rollback:backend-on-frontend-failure:
+  stage: deploy
+  when: on_failure
+  image:
+    name: alpine/k8s:1.34.1
+    entrypoint: [""]
+  extends: .yc_install
+  needs:
+    - job: deploy:frontend
+  script:
+    - yc managed-kubernetes cluster get-credentials k8s-cluster --external --force
+    - |
+      echo "deploy:frontend failed — rolling back backend to keep both services on the previous tag"
+      helm rollback backend 0 --namespace momo-store --wait --timeout 3m || echo "no previous backend revision to roll back to"
+
+deploy:backend:
+  stage: deploy
+#  when: manual
+  image:
+    name: alpine/k8s:1.34.1
+    entrypoint: [""]
+  needs:
+    - job: extract_new_tag
+      artifacts: true
+    - job: create_release
+      optional: true
+  extends: .yc_install
+  script:
+    - yc managed-kubernetes cluster get-credentials k8s-cluster --external --force
+    - export REGISTRY_ID=$(yc container registry get "${CONTAINER_REGISTRY}" | awk '/^id:/ {print $2}')
+    - |
+      sed -i.bak -E "s/^appVersion:.*/appVersion: \"${LATEST_TAG}\"/" helm/backend/Chart.yaml
+      rm -f helm/backend/Chart.yaml.bak
+      echo "Updated backend Chart.yaml appVersion to ${LATEST_TAG}:"
+      grep ^appVersion helm/backend/Chart.yaml
+    - |
+      helm upgrade --install backend helm/backend \
+        --namespace momo-store \
+        --create-namespace \
+        --set image.repository=cr.yandex/$REGISTRY_ID/backend \
+        --set image.tag=${LATEST_TAG} \
+        --set image.pullPolicy=IfNotPresent \
+        --set serviceMonitor.enabled=true \
+        --atomic \
+        --cleanup-on-fail \
+        --timeout 3m
+    - |
+      echo "Smoke testing backend..."
+      kubectl -n momo-store rollout status deployment/backend --timeout=120s
+      kubectl -n momo-store port-forward svc/backend 18081:8081 >/dev/null 2>&1 &
+      PF_PID=$!
+      trap 'kill $PF_PID 2>/dev/null || true' EXIT
+      sleep 3
+      OK=0
+      for i in $(seq 1 5); do
+        if curl -fsS --max-time 10 http://127.0.0.1:18081/health >/dev/null; then OK=1; break; fi
+        echo "attempt $i failed, retrying in 3s..."; sleep 3
+      done
+      if [ "$OK" -ne 1 ]; then
+        echo "Smoke test FAILED — rolling back backend to previous revision"
+        helm rollback backend 0 --namespace momo-store --wait --timeout 3m || echo "no previous revision to roll back to"
+        exit 1
+      fi
+      echo "Smoke test passed"
+
+# Fully provisions HTTPS for the site. Idempotent and safe to re-run:
+#   1. ensures the ALB security group (80/443 + YC health-check ranges)
+#   2. ensures a managed Let's Encrypt certificate, publishing the DNS-01
+#      challenge CNAME to deSEC and waiting until the cert is ISSUED
+#   3. installs/upgrades the GWIN controller
+#   4. deploys the Gateway + HTTPRoutes + YCCertificate (helm/gwin chart)
+#   5. points the apex A record at the ALB IP via deSEC
+#   6. smoke-tests HTTPS (validating the trusted cert) before succeeding
+#
+# Requires CI/CD variables: DESEC_TOKEN (masked) plus the YC_* vars used by
+# .yc_install. Let's Encrypt auto-renews afterwards via the persistent CNAME.
+deploy:gwin:
+  stage: deploy
+#  when: manual
+  image:
+    name: alpine/k8s:1.34.1
+    entrypoint: [""]
+  extends: .yc_install
+  needs:
+    - job: deploy:frontend
+  variables:
+    # Default placeholder — override with a project CI/CD variable named DOMAIN
+    # (project variables take precedence over this in-file default).
+    DOMAIN: "example.dedyn.io"
+    CERT_NAME: "momo-store-cert"
+    SG_NAME: "momo-alb-sg"
+  script:
+    - apk add --no-cache jq
+    - yc managed-kubernetes cluster get-credentials k8s-cluster --external --force
+    - |
+      set -e
+      DESEC_API="https://desec.io/api/v1/domains/${DOMAIN}/rrsets/"
+      desec_put() {
+        sub="$1"; rtype="$2"; rec="$3"
+        curl -sS -f -X PUT "${DESEC_API}" \
+          -H "Authorization: Token ${DESEC_TOKEN}" \
+          -H "Content-Type: application/json" \
+          -d "[{\"subname\":\"${sub}\",\"type\":\"${rtype}\",\"ttl\":3600,\"records\":[\"${rec}\"]}]" >/dev/null
+      }
+
+      # --- 1. ALB security group -------------------------------------------
+      NETWORK_ID=$(yc managed-kubernetes cluster get "${CI_GWIN_CLUSTER:-k8s-cluster}" --format json | jq -r '.network_id')
+      SG_ID=$(yc vpc security-group list --format json | jq -r "[.[] | select(.name==\"${SG_NAME}\") | .id][0] // empty")
+      if [ -z "${SG_ID}" ] || [ "${SG_ID}" = "null" ]; then
+        echo "Creating security group ${SG_NAME}..."
+        SG_ID=$(yc vpc security-group create --name "${SG_NAME}" --network-id "${NETWORK_ID}" \
+          --rule "direction=ingress,port=80,protocol=tcp,v4-cidrs=[0.0.0.0/0]" \
+          --rule "direction=ingress,port=443,protocol=tcp,v4-cidrs=[0.0.0.0/0]" \
+          --rule "direction=ingress,from-port=0,to-port=65535,protocol=tcp,predefined=loadbalancer_healthchecks" \
+          --rule "direction=egress,from-port=0,to-port=65535,protocol=any,v4-cidrs=[0.0.0.0/0]" \
+          --format json | jq -r '.id')
+      fi
+      echo "Security group: ${SG_ID}"
+
+      # --- 2. Managed Let's Encrypt certificate ----------------------------
+      CERT_ID=$(yc certificate-manager certificate list --format json | jq -r "[.[] | select(.name==\"${CERT_NAME}\") | .id][0] // empty")
+      if [ -z "${CERT_ID}" ] || [ "${CERT_ID}" = "null" ]; then
+        echo "Requesting managed certificate ${CERT_NAME}..."
+        CERT_ID=$(yc certificate-manager certificate request --name "${CERT_NAME}" \
+          --domains "${DOMAIN}" --challenge dns --format json | jq -r '.id')
+      fi
+      echo "Certificate: ${CERT_ID}"
+
+      STATUS=$(yc certificate-manager certificate get --id "${CERT_ID}" --format json | jq -r '.status')
+      if [ "${STATUS}" != "ISSUED" ]; then
+        # Challenge details can lag a few seconds behind the request.
+        CH=""
+        for i in $(seq 1 12); do
+          # Pick the CNAME challenge specifically: YC keeps revalidating it on
+          # renewal, so a one-time CNAME is enough. (A TXT challenge is also
+          # offered but would need re-publishing every renewal.)
+          CH=$(yc certificate-manager certificate get --id "${CERT_ID}" --full --format json \
+            | jq -r '[.challenges[]? | select(.type=="DNS" and .dns_challenge.type=="CNAME") | "\(.dns_challenge.name) \(.dns_challenge.value)"][0] // empty')
+          [ -n "${CH}" ] && break
+          echo "waiting for challenge details..."; sleep 5
+        done
+        [ -n "${CH}" ] || { echo "No DNS challenge returned for certificate"; exit 1; }
+        CH_NAME=$(echo "${CH}" | awk '{print $1}')
+        CH_VALUE=$(echo "${CH}" | awk '{print $2}')
+        SUBNAME=$(echo "${CH_NAME}" | sed "s/\.${DOMAIN}\.\{0,1\}$//")
+        case "${CH_VALUE}" in *.) ;; *) CH_VALUE="${CH_VALUE}." ;; esac
+        echo "Publishing ACME challenge: ${SUBNAME} CNAME ${CH_VALUE}"
+        desec_put "${SUBNAME}" "CNAME" "${CH_VALUE}"
+        echo "Waiting for certificate to become ISSUED..."
+        for i in $(seq 1 60); do
+          STATUS=$(yc certificate-manager certificate get --id "${CERT_ID}" --format json | jq -r '.status')
+          echo "  cert status: ${STATUS}"
+          [ "${STATUS}" = "ISSUED" ] && break
+          sleep 15
+        done
+      fi
+      [ "${STATUS}" = "ISSUED" ] || { echo "Certificate not ISSUED in time"; exit 1; }
+
+      # --- 3. GWIN controller ----------------------------------------------
+      yc iam key create --service-account-name k8s-sa --output sa-key.json
+      helm pull oci://cr.yandex/yc-marketplace/yandex-cloud/gwin/gwin-chart --version v1.4.0 --untar --untardir gwin-controller
+      kubectl apply --server-side --force-conflicts -f gwin-controller/gwin-chart/crds/
+      kubectl wait --for=condition=established --timeout=120s \
+        crd/gatewayclasses.gateway.networking.k8s.io \
+        crd/gateways.gateway.networking.k8s.io \
+        crd/httproutes.gateway.networking.k8s.io \
+        crd/yccertificates.gwin.yandex.cloud
+      helm upgrade --install gwin gwin-controller/gwin-chart \
+        --namespace gwin-space --create-namespace \
+        --set controller.folderId="${YC_FOLDER_ID}" \
+        --set-file controller.ycServiceAccount.secret.value=./sa-key.json \
+        --wait --timeout 5m
+
+      # --- 4. Gateway + routes + certificate binding -----------------------
+      # Pin the ALB to the dedicated NAT-free subnet (subnet-alb, created by
+      # Terraform). GWIN would otherwise allocate the ALB in the node subnet,
+      # whose 0.0.0.0/0 -> NAT-gateway route disables the ALB's public IP and
+      # breaks health checks. The GatewayPolicy in the chart enforces this.
+      ALB_SUBNET_ID=$(yc vpc subnet list --format json | jq -r '[.[] | select(.name=="subnet-alb") | .id][0] // empty')
+      [ -n "${ALB_SUBNET_ID}" ] || { echo "subnet-alb not found — run provision:k8s (terraform apply) first"; exit 1; }
+      echo "ALB subnet: ${ALB_SUBNET_ID}"
+      helm upgrade --install gwin-resources helm/gwin \
+        --namespace momo-store --create-namespace \
+        --set hostname="${DOMAIN}" \
+        --set gateway.securityGroupId="${SG_ID}" \
+        --set gateway.albSubnetId="${ALB_SUBNET_ID}" \
+        --set certificate.id="${CERT_ID}" \
+        --wait --timeout 5m
+
+      # --- 5. Point DNS at the ALB -----------------------------------------
+      # GWIN does not write the ALB address back into the Gateway's
+      # status.addresses, so read it from the Application Load Balancer the
+      # controller created. The ALB is tagged with gwin-* labels identifying the
+      # owning Gateway, which is more robust than its generated name.
+      echo "Waiting for the GWIN-managed ALB to get an external address..."
+      ALB_IP=""
+      for i in $(seq 1 80); do
+        ALB_ID=$(yc application-load-balancer load-balancer list --format json \
+          | jq -r '[.[] | select(.labels["gwin-namespace"]=="momo-store" and .labels["gwin-name"]=="momo-gateway")][0].id // empty')
+        if [ -n "${ALB_ID}" ]; then
+          ALB_IP=$(yc application-load-balancer load-balancer get --id "${ALB_ID}" --format json \
+            | jq -r '[.listeners[]?.endpoints[]?.addresses[]?.external_ipv4_address?.address] | map(select(. != null)) | .[0] // empty')
+          [ -n "${ALB_IP}" ] && break
+        fi
+        echo "  waiting for ALB address... (${i})"
+        sleep 15
+      done
+      [ -n "${ALB_IP}" ] || { echo "ALB never got an external address"; exit 1; }
+      echo "ALB address: ${ALB_IP}"
+      desec_put "" "A" "${ALB_IP}"
+
+      # --- 6. HTTPS smoke test (pin host->IP so it doesn't wait on DNS) -----
+      echo "Smoke testing https://${DOMAIN} (validating trusted certificate)..."
+      OK=0
+      for i in $(seq 1 20); do
+        if curl -fsS --max-time 10 --resolve "${DOMAIN}:443:${ALB_IP}" "https://${DOMAIN}/momo-store/health" >/dev/null; then OK=1; break; fi
+        echo "  attempt $i failed, retrying in 10s..."; sleep 10
+      done
+      [ "${OK}" -eq 1 ] || { echo "HTTPS smoke test FAILED"; exit 1; }
+      echo "HTTPS is live at https://${DOMAIN}"

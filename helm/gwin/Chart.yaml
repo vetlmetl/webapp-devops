@@ -1,0 +1,8 @@
+apiVersion: v2
+name: gwin
+description: >-
+  Yandex Cloud GWIN Gateway, HTTPRoutes and managed-certificate binding that
+  expose the momo-store frontend over HTTPS via an Application Load Balancer.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

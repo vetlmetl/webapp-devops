@@ -1,0 +1,15 @@
+# CI Go cache (GOPATH=$CI_PROJECT_DIR/backend/.go, see _cicd-pipe/1_main.yaml)
+.go/
+
+# Build outputs
+momo-api
+*.tar.gz
+
+# Docker
+Dockerfile
+.dockerignore
+
+# Editor/VCS leftovers
+.git/
+.idea/
+.vscode/

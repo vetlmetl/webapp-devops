@@ -1,0 +1,71 @@
+provision:s3_bucket:
+  stage: provision
+  when: manual
+  image: hashicorp/terraform:1.15.5
+  extends: .yc_install
+  script:
+    - yc storage bucket create --name ${S3_BUCKET}
+
+provision:container_registry:
+  stage: provision
+  when: manual
+  image: hashicorp/terraform:1.15.5
+  extends: .yc_install
+  script:
+    - yc container registry create --name ${CONTAINER_REGISTRY}
+    - export REGISTRY_ID=$(yc container registry get ${CONTAINER_REGISTRY} | awk '/^id:/ {print $2}')
+    - yc container registry add-access-binding ${REGISTRY_ID} --role container-registry.admin --service-account-id ${SA_ID}
+
+provision:vm_docker:
+  stage: provision
+  when: manual
+  needs:
+    - job: extract_tag
+      artifacts: true
+  image: hashicorp/terraform:1.15.5
+  extends: .yc_install
+  script:
+    - echo "${SSH_PUB_KEY64}" | base64 -d > /tmp/key.pub
+    - KEY_ESCAPED=$(cat /tmp/key.pub | tr '\n' '\\n')
+#    - export RELEASE_TAG=$(cat release.txt)
+    - echo ${RELEASE_TAG}
+    - cd $CI_PROJECT_DIR/infra/terraform/vm-docker
+    - cp $CI_PROJECT_DIR/infra/terraform/sa-key.json $CI_PROJECT_DIR/infra/terraform/vm-docker/sa-key.json
+    - terraform init -backend-config="access_key=$ACCESS_KEY" -backend-config="secret_key=$SECRET_KEY"
+    - terraform apply -auto-approve -var="ssh_public_key=${KEY_ESCAPED}" -var="release_tag=${RELEASE_TAG}" -var="nexus_url=${NEXUS_URL}" -var="nexus_repo=${NEXUS_REPO}" -var="nexus_user=${NEXUS_USER}" -var="nexus_password=${NEXUS_PASSWORD}" -var="artifact_back=${ARTIFACT_BACK}" -var="artifact_front=${ARTIFACT_FRONT}" -var="yc_key=${YC_KEY}" -var="yc_cloud_id=${YC_CLOUD_ID}" -var="yc_folder_id=${YC_FOLDER_ID}" -var="container_registry=${CONTAINER_REGISTRY}"
+    - terraform output -raw external_ip_address > $CI_PROJECT_DIR/vm_ip.txt
+  artifacts:
+    paths:
+      - vm_ip.txt
+    expire_in: 1 week
+#  rules:
+#    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_TITLE =~ /release:v[0-9]+\.[0-9]+\.[0-9]+/
+#      when: on_success
+
+provision:k8s:
+  stage: provision
+#  when: manual
+  image: hashicorp/terraform:1.15.5
+  extends: .yc_install
+  script:
+    - cd $CI_PROJECT_DIR/infra/terraform/k8s
+    - cp $CI_PROJECT_DIR/infra/terraform/sa-key.json $CI_PROJECT_DIR/infra/terraform/k8s/sa-key.json
+    - terraform init -backend-config="access_key=$ACCESS_KEY" -backend-config="secret_key=$SECRET_KEY"
+    - terraform apply -auto-approve 
+    - terraform output -raw kubernetes_cluster_id > $CI_PROJECT_DIR/cluster.txt
+  artifacts:
+    paths:
+      - cluster.txt
+    expire_in: 1 week
+
+provision:DaemonSet:
+  stage: provision
+#  when: manual
+  image:
+    name: alpine/k8s:1.34.1
+    entrypoint: [""]
+  extends: .yc_install
+  needs: [provision:k8s]
+  script:
+    - yc managed-kubernetes cluster get-credentials k8s-cluster --external --force
+    - kubectl apply -f infra/daemon-set/node-drainer-all.yaml

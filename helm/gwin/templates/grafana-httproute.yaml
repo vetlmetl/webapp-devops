@@ -1,0 +1,35 @@
+{{- if .Values.grafana.enabled }}
+# Routes the secret Grafana sub-path on the shared hostname to the Grafana
+# Service in the monitoring namespace.
+#
+# Lives in grafana.namespace (same ns as the Service) so the backendRef needs no
+# ReferenceGrant. It attaches across namespaces to the Gateway in
+# {{ .Release.Namespace }} via an explicit parentRefs.namespace — permitted by
+# the https listener's allowedRoutes selector (see gateway.yaml). On the same
+# listener Gateway API prefers the longer path prefix, so this beats the
+# catch-all "/" app route. Grafana itself must serve from this sub-path
+# (grafana.ini server.root_url + serve_from_sub_path=true).
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ .Values.gateway.name }}-grafana
+  namespace: {{ .Values.grafana.namespace }}
+  labels:
+    {{- include "gwin.labels" . | nindent 4 }}
+spec:
+  hostnames:
+    - {{ .Values.hostname | quote }}
+  parentRefs:
+    - name: {{ .Values.gateway.name }}
+      namespace: {{ .Release.Namespace }}
+      sectionName: https
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: {{ .Values.grafana.pathPrefix | quote }}
+      backendRefs:
+        - kind: Service
+          name: {{ .Values.grafana.service }}
+          port: {{ .Values.grafana.port }}
+{{- end }}

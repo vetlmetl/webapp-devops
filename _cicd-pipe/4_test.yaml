@@ -1,0 +1,37 @@
+test:backend:
+  stage: test
+  image: golang:1.25
+  extends: .go-cache
+  needs: [extract_tag]
+  before_script:
+    - cd backend
+    - export PATH=$PATH:$GOPATH/bin
+    - go install gotest.tools/gotestsum@latest
+    - go install github.com/boumenot/gocover-cobertura@latest
+  script:
+    - go test ./... -coverprofile=coverage.out -covermode=atomic -json > test-results.json || true
+    - gotestsum --junitfile report.xml --raw-command -- cat test-results.json || true
+    - gocover-cobertura < coverage.out > coverage.xml
+    - go tool cover -func=coverage.out
+  artifacts:
+    when: always
+    reports:
+      junit: backend/report.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: backend/coverage.xml
+    paths:
+      - backend/coverage.out
+      - backend/test-results.json
+
+lint:iac:
+  stage: test
+  image: alpine:3.19
+  needs: [extract_tag]
+  before_script:
+    - apk add --no-cache curl bash openssl
+    - curl -s https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
+    - curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+  script:
+    - tflint --chdir=infra/terraform/ --recursive -f=json
+    - helm lint helm/backend helm/frontend

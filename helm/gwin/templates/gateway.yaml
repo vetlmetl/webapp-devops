@@ -1,0 +1,51 @@
+{{- if not .Values.gateway.securityGroupId }}
+{{- fail "gateway.securityGroupId is required (the ALB security group ID). Set it via --set gateway.securityGroupId=..." }}
+{{- end }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ .Values.gateway.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gwin.labels" . | nindent 4 }}
+  annotations:
+    gwin.yandex.cloud/securityGroups: {{ .Values.gateway.securityGroupId | quote }}
+spec:
+  gatewayClassName: {{ .Values.gateway.className }}
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      hostname: {{ .Values.hostname | quote }}
+      allowedRoutes:
+        namespaces:
+          from: Same
+    - name: https
+      protocol: HTTPS
+      port: 443
+      hostname: {{ .Values.hostname | quote }}
+      allowedRoutes:
+        namespaces:
+          {{- if .Values.grafana.enabled }}
+          # Allow the app route (this namespace) plus the Grafana route, which
+          # lives in grafana.namespace so it can backendRef the Grafana Service
+          # without a ReferenceGrant.
+          from: Selector
+          selector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values:
+                  - {{ .Release.Namespace }}
+                  - {{ .Values.grafana.namespace }}
+          {{- else }}
+          from: Same
+          {{- end }}
+      tls:
+        certificateRefs:
+          - group: gwin.yandex.cloud
+            kind: YCCertificate
+            name: {{ .Values.certificate.name }}
+  addresses:
+    - type: gwin.yandex.cloud/autoIPv4
+      value: auto

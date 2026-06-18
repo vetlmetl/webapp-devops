@@ -1,0 +1,30 @@
+{{- if .Values.gateway.albSubnetId }}
+# Pins the GWIN-managed Application Load Balancer to a specific subnet.
+#
+# By default GWIN allocates the ALB in the cluster node subnet. That subnet
+# carries a 0.0.0.0/0 -> NAT-gateway route (the nodes are private and reach the
+# internet through it), which disables public-IP ingress on the ALB's own
+# data-plane nodes and breaks the load balancer. We therefore put the ALB in a
+# dedicated NAT-free subnet (infra: yandex_vpc_subnet.subnet-alb) while the nodes
+# stay in the NAT-routed subnet. The ALB still reaches the node targets over
+# internal VPC routing.
+apiVersion: gwin.yandex.cloud/v1
+kind: GatewayPolicy
+metadata:
+  name: {{ .Values.gateway.name }}-alb
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gwin.labels" . | nindent 4 }}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ .Values.gateway.name }}
+  policy:
+    subnets:
+      - {{ .Values.gateway.albSubnetId | quote }}
+    {{- if .Values.gateway.securityGroupId }}
+    securityGroups:
+      - {{ .Values.gateway.securityGroupId | quote }}
+    {{- end }}
+{{- end }}

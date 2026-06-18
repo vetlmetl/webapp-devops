@@ -1,0 +1,21 @@
+extract_tag:
+  stage: extract
+  image: alpine/git:latest
+  before_script:
+    - apk add --no-cache curl jq
+  script:
+    - |
+      COMMIT_MSG=$(git log -1 --pretty=%B)
+      echo "Commit message: $COMMIT_MSG"
+      echo "COMMIT_MSG=$COMMIT_MSG" >> release.env
+      TAG=$(echo "$COMMIT_MSG" | sed -En 's/.*release:(v[0-9]+\.[0-9]+\.[0-9]+).*/\1/p' || true)
+      if [ -n "$TAG" ]; then
+        echo "RELEASE_TAG=${TAG}" >> release.env
+      else
+        echo "RELEASE_TAG=" >> release.env
+      fi
+  artifacts:
+    reports:
+      dotenv: release.env
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

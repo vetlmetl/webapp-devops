@@ -1,0 +1,45 @@
+# Redirect all plain HTTP to HTTPS.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ .Values.gateway.name }}-redirect
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gwin.labels" . | nindent 4 }}
+spec:
+  hostnames:
+    - {{ .Values.hostname | quote }}
+  parentRefs:
+    - name: {{ .Values.gateway.name }}
+      sectionName: http
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            statusCode: 301
+---
+# All HTTPS traffic goes to the frontend Service, which serves the SPA and
+# internally proxies /api/ to the backend.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ .Values.gateway.name }}-app
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gwin.labels" . | nindent 4 }}
+spec:
+  hostnames:
+    - {{ .Values.hostname | quote }}
+  parentRefs:
+    - name: {{ .Values.gateway.name }}
+      sectionName: https
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - kind: Service
+          name: {{ .Values.backend.service }}
+          port: {{ .Values.backend.port }}

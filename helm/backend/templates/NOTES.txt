@@ -1,0 +1,15 @@
+The backend is deployed as a ClusterIP Service and is reached only in-cluster:
+the frontend nginx proxies /api/ to it. There is no public Ingress or HTTPRoute.
+
+1. Check the rollout:
+  kubectl --namespace {{ .Release.Namespace }} rollout status deployment/{{ include "backend.fullname" . }}
+
+2. Reach the API locally:
+  kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "backend.fullname" . }} 8081:{{ .Values.service.port }}
+  # then: curl http://127.0.0.1:8081/health
+
+{{- if .Values.autoscaling.enabled }}
+
+3. Autoscaling is enabled ({{ .Values.autoscaling.minReplicas }}–{{ .Values.autoscaling.maxReplicas }} replicas). Watch the HPA:
+  kubectl --namespace {{ .Release.Namespace }} get hpa {{ include "backend.fullname" . }} -w
+{{- end }}

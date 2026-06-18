@@ -1,0 +1,51 @@
+# Values for the gwin chart.
+#
+# certificate.id and gateway.securityGroupId have no sensible defaults — they
+# point at cloud resources whose IDs are resolved at deploy time. The CI job
+# (deploy:gwin) discovers/creates them and passes them via --set. Templates fail
+# fast with a clear message if either is left empty.
+
+# Public hostname the site is served on. Must match the certificate's domain.
+# Overridden at deploy time by the CI DOMAIN variable (--set hostname=...).
+hostname: example.dedyn.io
+
+gateway:
+  name: momo-gateway
+  # GatewayClass provided by the GWIN controller.
+  className: gwin-default
+  # Security group allowing inbound 80/443 + YC ALB health checks. Set by CI.
+  securityGroupId: ""
+  # Subnet the ALB is allocated in. Must be a subnet WITHOUT a 0.0.0.0/0 ->
+  # NAT-gateway default route (see templates/gatewaypolicy.yaml and the infra
+  # resource yandex_vpc_subnet.subnet-alb). When empty, no GatewayPolicy is
+  # rendered and GWIN falls back to the node subnet — which breaks the ALB if
+  # the node subnet has a NAT egress route. Set by CI (deploy:gwin).
+  albSubnetId: ""
+
+certificate:
+  # Name of the YCCertificate custom resource created in the cluster.
+  name: momo-store-crt
+  # ID of the YC Certificate Manager managed certificate. Set by CI.
+  id: ""
+
+# Backend the HTTPS route forwards all traffic to. The frontend nginx serves
+# the SPA and internally proxies /api/ to the backend Service, so a single
+# catch-all rule is sufficient.
+backend:
+  service: frontend
+  port: 80
+
+# Two requirements live outside this chart (helm/prometheus/values.yaml):
+#   * the Grafana Service must be NodePort (GWIN targets node IPs:NodePort)
+#   * Grafana must serve from this sub-path
+#     (grafana.ini server.root_url + serve_from_sub_path=true)
+grafana:
+  enabled: true
+  namespace: monitoring
+  # kube-prometheus-stack names the Service "<release>-grafana"; the monitoring
+  # job installs it as release "prometheus".
+  service: prometheus-grafana
+  port: 80
+  # Path prefix Grafana is served under. Pick your own hard-to-guess value and
+  # keep it in sync with grafana.ini server.root_url in helm/prometheus/values.yaml.
+  pathPrefix: /grafana

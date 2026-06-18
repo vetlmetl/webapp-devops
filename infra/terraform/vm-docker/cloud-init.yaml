@@ -1,0 +1,41 @@
+#cloud-config
+datasource:
+  Ec2:
+    strict_id: false
+ssh_pwauth: no
+users:
+- name: ubuntu
+  sudo: 'ALL=(ALL) NOPASSWD:ALL'
+  shell: /bin/bash
+  ssh_authorized_keys:
+  - ${ssh_public_key}
+packages:
+  - wget
+  - tar
+  - curl
+  - mc
+runcmd:
+  - export HOME=/root; curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash -s -- -i /opt -n
+  - echo "${yc_key}" | base64 -d > /tmp/sa-key.json
+  - rm -rf /home/ubuntu/.docker/config.json || true
+  - rm -rf /root/.docker/config.json || true
+  - cd /opt
+  - |
+    cat > env.sh << EOF
+    export ARTIFACT_BACK=${artifact_back}
+    export ARTIFACT_FRONT=${artifact_front}
+    export CONTAINER_REGISTRY=${container_registry}
+    export NEXUS_URL=${nexus_url}
+    export NEXUS_REPO=${nexus_repo}
+    export NEXUS_USER=${nexus_user}
+    export NEXUS_PASSWORD=${nexus_password}
+    export YC_CLOUD_ID=${yc_cloud_id}
+    export YC_FOLDER_ID=${yc_folder_id}
+    export RELEASE_TAG=${release_tag}
+    EOF
+  - chmod 555 /opt/env.sh 
+  - chown -R ubuntu:ubuntu /opt
+  - cat /opt/env.sh >> /home/ubuntu/.bashrc
+  - echo "WE ARE DONE" >> /opt/done_provisioning.txt
+
+

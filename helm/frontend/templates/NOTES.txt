@@ -1,0 +1,17 @@
+The frontend is deployed as a ClusterIP Service and exposed publicly over HTTPS
+through the GWIN Gateway/ALB (see the helm/gwin chart), which routes all traffic
+to this Service. The nginx container serves the SPA and proxies /api/ to the
+backend Service.
+
+1. Check the rollout:
+  kubectl --namespace {{ .Release.Namespace }} rollout status deployment/{{ include "frontend.fullname" . }}
+
+2. Reach it locally without the Gateway:
+  kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "frontend.fullname" . }} 8080:{{ .Values.service.port }}
+  # then visit http://127.0.0.1:8080/momo-store/
+
+{{- if .Values.autoscaling.enabled }}
+
+3. Autoscaling is enabled ({{ .Values.autoscaling.minReplicas }}–{{ .Values.autoscaling.maxReplicas }} replicas). Watch the HPA:
+  kubectl --namespace {{ .Release.Namespace }} get hpa {{ include "frontend.fullname" . }} -w
+{{- end }}

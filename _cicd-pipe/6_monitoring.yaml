@@ -1,0 +1,66 @@
+monitoring:prometheus:
+  stage: monitoring
+#  when: manual
+  image:
+    name: alpine/k8s:1.34.1
+    entrypoint: [""]
+  extends: .yc_install
+  script:
+    - yc managed-kubernetes cluster get-credentials k8s-cluster --external --force
+    - kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+    - |
+      kubectl create secret generic telegram-bot-token \
+        --namespace monitoring \
+        --from-literal=token="${TELEGRAM_BOT_TOKEN}" \
+        --dry-run=client -o yaml | kubectl apply -f -
+    # kube-prometheus-stack >= 47.x does not ship CRDs in the chart package.
+    # Install the matching Prometheus Operator CRD bundle (operator v0.91.0 ships with chart 86.2.2)
+    # before running `helm upgrade --install` so Alertmanager/Prometheus/PrometheusRule/ServiceMonitor/PodMonitor exist.
+    - |
+      kubectl apply --server-side --force-conflicts -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.91.0/example/prometheus-operator-crd/monitoring.coreos.com_alertmanagerconfigs.yaml
+      kubectl apply --server-side --force-conflicts -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.91.0/example/prometheus-operator-crd/monitoring.coreos.com_alertmanagers.yaml
+      kubectl apply --server-side --force-conflicts -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.91.0/example/prometheus-operator-crd/monitoring.coreos.com_prometheusagents.yaml
+      kubectl apply --server-side --force-conflicts -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.91.0/example/prometheus-operator-crd/monitoring.coreos.com_prometheuses.yaml
+      kubectl apply --server-side --force-conflicts -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.91.0/example/prometheus-operator-crd/monitoring.coreos.com_prometheusrules.yaml
+      kubectl apply --server-side --force-conflicts -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.91.0/example/prometheus-operator-crd/monitoring.coreos.com_scrapeconfigs.yaml
+      kubectl apply --server-side --force-conflicts -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.91.0/example/prometheus-operator-crd/monitoring.coreos.com_servicemonitors.yaml
+      kubectl apply --server-side --force-conflicts -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.91.0/example/prometheus-operator-crd/monitoring.coreos.com_podmonitors.yaml
+      kubectl apply --server-side --force-conflicts -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.91.0/example/prometheus-operator-crd/monitoring.coreos.com_probes.yaml
+      kubectl apply --server-side --force-conflicts -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.91.0/example/prometheus-operator-crd/monitoring.coreos.com_thanosrulers.yaml
+    # Wait for the API server to register (establish) the CRD endpoints before running helm.
+    # Otherwise helm's RESTMapper discovery races the apiextensions controller and fails with
+    # `no matches for kind "Alertmanager"/"Prometheus"/... in version "monitoring.coreos.com/v1"`.
+    - |
+      kubectl wait --for condition=established --timeout=120s \
+        crd/alertmanagerconfigs.monitoring.coreos.com \
+        crd/alertmanagers.monitoring.coreos.com \
+        crd/prometheusagents.monitoring.coreos.com \
+        crd/prometheuses.monitoring.coreos.com \
+        crd/prometheusrules.monitoring.coreos.com \
+        crd/scrapeconfigs.monitoring.coreos.com \
+        crd/servicemonitors.monitoring.coreos.com \
+        crd/podmonitors.monitoring.coreos.com \
+        crd/probes.monitoring.coreos.com \
+        crd/thanosrulers.monitoring.coreos.com
+    - |
+      helm upgrade --install prometheus oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack \
+        --version 86.2.2 \
+        --namespace monitoring \
+        --create-namespace \
+        -f helm/prometheus/alertmanager.yaml \
+        -f helm/prometheus/values.yaml \
+        --atomic \
+        --cleanup-on-fail \
+        --timeout 10m \
+        --debug
+    - |
+      kubectl create configmap momo-store-dashboard \
+        --namespace monitoring \
+        --from-file=momo-store.json=helm/prometheus/dashboard.json \
+        --dry-run=client -o yaml | kubectl apply -f -
+    - kubectl label configmap momo-store-dashboard --namespace monitoring grafana_dashboard=1 --overwrite
+    - yc container registry get "${CONTAINER_REGISTRY}" | awk '/^id:/ {print $2}' > "${CI_PROJECT_DIR}/registry.txt"
+  artifacts:
+    paths:
+      - registry.txt
+    expire_in: 1 hour

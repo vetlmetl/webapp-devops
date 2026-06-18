@@ -1,0 +1,11 @@
+# .gitlab-ci.yml
+include:
+  - local: _cicd-pipe/1_main.yaml
+  - local: _cicd-pipe/2_tagging.yaml
+  - local: _cicd-pipe/3_provision.yaml
+  - local: _cicd-pipe/4_test.yaml
+  - local: _cicd-pipe/5_analyse.yaml
+  - local: _cicd-pipe/6_monitoring.yaml
+  - local: _cicd-pipe/7_build.yaml
+  - local: _cicd-pipe/8_deploy.yaml
+  - local: _cicd-pipe/9_destroy.yaml
